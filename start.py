@@ -393,7 +393,7 @@ def set_jetty_config(m2ee):
         logger.warning("Failed to configure jetty", exc_info=True)
 
 
-def _get_s3_specific_config(vcap_services, m2ee):
+def _get_s3_specific_config(vcap_data, vcap_services, m2ee):
     access_key = secret = bucket = encryption_keys = key_suffix = None
     endpoint = None
     v2_auth = ""
@@ -431,6 +431,12 @@ def _get_s3_specific_config(vcap_services, m2ee):
         match = re.search(pattern, _conf["uri"])
         endpoint = "https://" + match.group(4)
         bucket = match.group(5)
+        v2_auth = "true"
+
+    elif "cloud-object-storage" in vcap_services:
+        access_key, secret, bucket, endpoint = _get_ibm_cos_configuration(
+            vcap_data, vcap_services
+        )
         v2_auth = "true"
 
     access_key = os.getenv("S3_ACCESS_KEY_ID", access_key)
@@ -478,6 +484,41 @@ def _get_s3_specific_config(vcap_services, m2ee):
     return config
 
 
+def _get_ibm_cos_configuration(vcap_data, vcap_services):
+    # return access_key, secret, bucket and endpoint for COS service
+    # to get the endpoint url the endpoints url is queried, the url is determined
+    # via the path service-endpoints -> regional -> BLUEMIX_REGION -> public -> BLUEMIX_REGION
+    _conf = vcap_services["cloud-object-storage"][0]["credentials"]
+
+    bluemix_region = os.getenv("BLUEMIX_REGION", "")
+    if bluemix_region is not None:
+        region = bluemix_region.split(":")[-1]
+
+    # query endpoints and get region specific endpoint
+    try:
+        result = requests.get(
+            _conf["endpoints"], headers={"Content-Type": "application/json"}
+        )
+
+        endpoints = json.loads(result.text)
+        service_endpoints = endpoints["service-endpoints"]
+        endpoint = "https://{}".format(service_endpoints["regional"][region]["public"][region])
+    except KeyError:
+        logger.warning("Failed go get COS url from endpoints, invalid path")
+        return None, None, None, None
+    except Exception as e:
+        logger.error(
+            "Failed get endpoint for IBM COS service: ", exc_info=True
+        )
+        return None, None, None, None
+
+    access_key = _conf["cos_hmac_keys"]["access_key_id"]
+    secret = _conf["cos_hmac_keys"]["secret_access_key"]
+    bucket = vcap_data["application_name"]
+
+    return access_key, secret, bucket, endpoint
+
+
 def _get_swift_specific_config(vcap_services, m2ee):
     if "Object-Storage" not in vcap_services:
         return None
@@ -523,9 +564,10 @@ def _get_azure_storage_specific_config(vcap_services, m2ee):
 
 
 def get_filestore_config(m2ee):
+    vcap_data = buildpackutil.get_vcap_data()
     vcap_services = buildpackutil.get_vcap_services_data()
 
-    config = _get_s3_specific_config(vcap_services, m2ee)
+    config = _get_s3_specific_config(vcap_data, vcap_services, m2ee)
 
     if config is None:
         config = _get_swift_specific_config(vcap_services, m2ee)
